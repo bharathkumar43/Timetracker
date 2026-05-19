@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Rename-Item -Path \"C:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\next.config.ts\" -NewName \"next.config.js\")",
+      "PowerShell(Rename-Item -Path \"C:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\next.config.ts\" -NewName \"next.config.js\")"
+    ]
+  }
+}
