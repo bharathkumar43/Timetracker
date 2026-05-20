@@ -40,7 +40,6 @@ export default function DashboardPage() {
   const [saveAllLoading, setSaveAllLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState<string>("");
-  const [hasSaved, setHasSaved] = useState(false);      // user clicked Save All at least once this session
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [submittedAt, setSubmittedAt] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -51,10 +50,7 @@ export default function DashboardPage() {
   const [addingTask, setAddingTask] = useState(false);
   const [addTaskError, setAddTaskError] = useState("");
 
-  useEffect(() => {
-    setSelectedDate(todayString());
-  }, []);
-
+  useEffect(() => { setSelectedDate(todayString()); }, []);
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
   }, [status, router]);
@@ -73,9 +69,7 @@ export default function DashboardPage() {
         setIsSubmitted(data.submitted);
         setSubmittedAt(data.submittedAt);
       }
-    } catch {
-      // non-critical
-    }
+    } catch { /* non-critical */ }
   }, []);
 
   const fetchEntries = useCallback(async (date: string) => {
@@ -91,9 +85,11 @@ export default function DashboardPage() {
         next[task.id] = { durationInput: "", duration: 0, notes: "", dirty: false, saving: false };
       }
       for (const entry of entries) {
+        // Show "0" for explicitly saved zero-duration entries so they persist visually
+        const displayInput = entry.duration > 0 ? formatDuration(entry.duration) : "0";
         next[entry.taskId] = {
           entryId: entry.id,
-          durationInput: entry.duration > 0 ? formatDuration(entry.duration) : "",
+          durationInput: displayInput,
           duration: entry.duration,
           notes: entry.notes ?? "",
           dirty: false,
@@ -106,12 +102,9 @@ export default function DashboardPage() {
   }, [tasks]);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
-
   useEffect(() => {
     if (tasks.length > 0 && selectedDate) fetchEntries(selectedDate);
   }, [tasks, selectedDate, fetchEntries]);
-
-  // Reset all per-date state when date changes
   useEffect(() => {
     if (selectedDate && status === "authenticated") {
       setIsSubmitted(false);
@@ -119,7 +112,6 @@ export default function DashboardPage() {
       setSubmitError("");
       setSaveError("");
       setSaveStatus("idle");
-      setHasSaved(false);
       fetchSubmissionStatus(selectedDate);
     }
   }, [selectedDate, status, fetchSubmissionStatus]);
@@ -135,22 +127,27 @@ export default function DashboardPage() {
 
   const handleDurationBlur = (taskId: string, input: string) => {
     const trimmed = input.trim().toUpperCase();
-    // "0", "NA", "N/A", empty → treat as "not worked on" (duration 0)
-    if (trimmed === "" || trimmed === "0" || trimmed === "NA" || trimmed === "N/A") {
-      updateRow(taskId, { durationInput: trimmed === "" ? "" : trimmed, duration: 0 });
+    if (trimmed === "" ) {
+      // Empty — mark as dirty but clear (will delete existing entry if any)
+      updateRow(taskId, { durationInput: "", duration: 0 });
+      return;
+    }
+    if (trimmed === "0" || trimmed === "NA" || trimmed === "N/A") {
+      // Explicit zero — normalise display to "0"
+      updateRow(taskId, { durationInput: "0", duration: 0 });
       return;
     }
     const parsed = parseDuration(input);
     if (parsed !== null && parsed > 0) {
       updateRow(taskId, { durationInput: formatDuration(parsed), duration: parsed });
     } else {
+      // Unrecognised — show as-is, duration 0
       updateRow(taskId, { durationInput: input, duration: 0 });
     }
   };
 
-  // Always POST upsert — API handles create+update via @@unique([userId, taskId, date])
+  // Saves a single row to the DB — duration 0 is allowed (explicit "not worked")
   const saveRow = async (taskId: string, date: string, row: RowState): Promise<void> => {
-    if (row.duration === 0) return;
     setRows((prev) => ({ ...prev, [taskId]: { ...prev[taskId], saving: true } }));
     try {
       const res = await fetch("/api/entries", {
@@ -178,13 +175,14 @@ export default function DashboardPage() {
     setSaveError("");
 
     try {
-      // Flush any typed-but-unblurred durations
+      // Flush any typed-but-unblurred inputs
       const flushed = { ...rows };
       for (const [taskId, row] of Object.entries(flushed)) {
-        if (row.dirty && row.durationInput.trim() && row.duration === 0) {
-          const val = row.durationInput.trim().toUpperCase();
-          // Explicitly skip 0/NA — they mean "not worked on"
-          if (val !== "0" && val !== "NA" && val !== "N/A") {
+        if (row.dirty && row.durationInput.trim()) {
+          const trimmed = row.durationInput.trim().toUpperCase();
+          if (trimmed === "0" || trimmed === "NA" || trimmed === "N/A") {
+            flushed[taskId] = { ...row, durationInput: "0", duration: 0 };
+          } else if (row.duration === 0) {
             const parsed = parseDuration(row.durationInput);
             if (parsed !== null && parsed > 0) {
               flushed[taskId] = { ...row, duration: parsed, durationInput: formatDuration(parsed) };
@@ -194,17 +192,24 @@ export default function DashboardPage() {
       }
       setRows(flushed);
 
-      // Save dirty rows with actual time entered
-      const toSave = Object.entries(flushed).filter(([, r]) => r.dirty && r.duration > 0);
+      // Save every dirty row that has something typed (including "0" / "NA")
+      // durationInput non-empty = user explicitly filled this cell
+      const toSave = Object.entries(flushed).filter(
+        ([, r]) => r.dirty && r.durationInput.trim() !== ""
+      );
       await Promise.all(toSave.map(([taskId, row]) => saveRow(taskId, selectedDate, row)));
 
-      // Delete entries that were cleared (user erased a previously-saved entry)
-      const toDelete = Object.entries(flushed).filter(([, r]) => r.dirty && r.duration === 0 && r.entryId);
-      await Promise.all(toDelete.map(([, row]) =>
-        fetch(`/api/entries/${row.entryId}`, { method: "DELETE" })
-      ));
+      // Delete entries the user explicitly cleared (had a saved entry, now input is empty)
+      const toDelete = Object.entries(flushed).filter(
+        ([, r]) => r.dirty && r.durationInput.trim() === "" && r.entryId
+      );
+      await Promise.all(
+        toDelete.map(([, row]) =>
+          fetch(`/api/entries/${row.entryId}`, { method: "DELETE" })
+        )
+      );
 
-      // Reset all remaining dirty rows (0/NA/empty — nothing to save for them)
+      // Mark remaining dirty rows (blank, no prior entry) as clean
       setRows((prev) => {
         const next = { ...prev };
         for (const taskId of Object.keys(next)) {
@@ -217,7 +222,6 @@ export default function DashboardPage() {
 
       if (toDelete.length > 0) await fetchEntries(selectedDate);
 
-      setHasSaved(true);
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 3000);
     } catch (e) {
@@ -274,9 +278,10 @@ export default function DashboardPage() {
 
   const totalMinutes = Object.values(rows).reduce((sum, r) => sum + r.duration, 0);
   const dirtyCount = Object.values(rows).filter((r) => r.dirty).length;
-  const hasSavedEntries = Object.values(rows).some((r) => r.entryId && r.duration > 0);
-  // Can submit if: all changes saved AND (clicked Save All this session OR has existing saved entries)
-  const canSubmit = !submitting && dirtyCount === 0 && (hasSaved || hasSavedEntries);
+
+  // Any row with a saved entry (even duration=0) counts — user explicitly filled this cell
+  const hasSavedEntries = Object.values(rows).some((r) => r.entryId !== undefined);
+  const canSubmit = !submitting && dirtyCount === 0 && hasSavedEntries;
 
   if (status === "loading" || status === "unauthenticated") {
     return (
@@ -315,7 +320,7 @@ export default function DashboardPage() {
             </div>
             <div>
               <p className="text-blue-900 font-semibold">{formatDuration(totalMinutes)} logged</p>
-              <p className="text-blue-600 text-xs">{Object.values(rows).filter((r) => r.duration > 0).length} tasks</p>
+              <p className="text-blue-600 text-xs">{Object.values(rows).filter((r) => r.duration > 0).length} tasks with time</p>
             </div>
           </div>
         )}
@@ -336,17 +341,19 @@ export default function DashboardPage() {
             <div className="divide-y divide-slate-100">
               {tasks.map((task) => {
                 const row = rows[task.id] ?? { durationInput: "", duration: 0, notes: "", dirty: false, saving: false };
-                const hasValue = row.duration > 0;
+                const hasTime = row.duration > 0;
+                // A saved "0" entry still has an entryId — show it differently from blank
+                const isSavedZero = row.entryId !== undefined && row.duration === 0;
 
                 return (
                   <div
                     key={task.id}
                     className={`grid grid-cols-[1fr_160px_1fr] gap-4 px-5 py-3.5 items-center transition-colors ${
-                      hasValue ? "bg-emerald-50/40" : "hover:bg-slate-50/60"
+                      hasTime ? "bg-emerald-50/40" : isSavedZero ? "bg-slate-50/60" : "hover:bg-slate-50/40"
                     }`}
                   >
                     <div>
-                      <p className={`text-sm font-medium ${hasValue ? "text-slate-900" : "text-slate-700"}`}>
+                      <p className={`text-sm font-medium ${hasTime ? "text-slate-900" : "text-slate-700"}`}>
                         {task.name}
                       </p>
                       {task.description && (
@@ -375,8 +382,10 @@ export default function DashboardPage() {
                         }}
                         onBlur={(e) => handleDurationBlur(task.id, e.target.value)}
                         className={`w-full border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors ${
-                          hasValue
+                          hasTime
                             ? "border-emerald-300 bg-white text-emerald-800 font-medium"
+                            : isSavedZero
+                            ? "border-slate-300 bg-white text-slate-500"
                             : "border-slate-300 bg-white"
                         }`}
                       />
@@ -443,10 +452,9 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Bottom action area */}
+        {/* Action bar */}
         <div className="space-y-3 pt-2">
 
-          {/* Submitted banner */}
           {isSubmitted && (
             <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
               <svg className="w-5 h-5 text-emerald-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -463,7 +471,6 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Save error */}
           {saveStatus === "error" && saveError && (
             <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
               <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -473,7 +480,6 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Submit error */}
           {submitError && (
             <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
               <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -498,9 +504,9 @@ export default function DashboardPage() {
                   Saved!
                 </span>
               )}
-              {!hasSaved && !hasSavedEntries && dirtyCount === 0 && !loading && tasks.length > 0 && (
+              {!hasSavedEntries && dirtyCount === 0 && !loading && tasks.length > 0 && saveStatus === "idle" && (
                 <span className="text-slate-400 text-xs">
-                  Fill in your time or enter 0/NA, then click Save All
+                  Fill in your time (or 0 / NA for tasks not worked), then Save All
                 </span>
               )}
             </div>
@@ -511,9 +517,9 @@ export default function DashboardPage() {
                 disabled={saveAllLoading || dirtyCount === 0}
                 className="bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 border border-slate-300 font-semibold px-5 py-2.5 rounded-xl transition-colors flex items-center gap-2 text-sm"
               >
-                {saveAllLoading ? (
+                {saveAllLoading && (
                   <div className="w-4 h-4 border-2 border-slate-500 border-t-transparent rounded-full animate-spin" />
-                ) : null}
+                )}
                 {saveAllLoading ? "Saving…" : "Save All"}
               </button>
 
@@ -522,13 +528,13 @@ export default function DashboardPage() {
                 disabled={!canSubmit}
                 title={
                   dirtyCount > 0 ? "Save your changes first" :
-                  (!hasSaved && !hasSavedEntries) ? "Fill in your timesheet and click Save All first" : ""
+                  !hasSavedEntries ? "Fill in your timesheet and click Save All first" : ""
                 }
                 className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold px-6 py-2.5 rounded-xl transition-colors flex items-center gap-2"
               >
-                {submitting ? (
+                {submitting && (
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                ) : null}
+                )}
                 {submitting ? "Submitting…" : isSubmitted ? "Re-submit" : "Submit"}
               </button>
             </div>

@@ -1,0 +1,18 @@
+
+> employee-time-tracker@0.1.0 dev
+> next dev -p 3300
+
+  ▲ Next.js 14.2.18
+  - Local:        http://localhost:3300
+  - Environments: .env
+
+ ✓ Starting...
+ ✓ Ready in 2.7s
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 4.9s (266 modules)
+ GET /api/auth/session 200 in 6688ms
+ GET /api/auth/session 200 in 155ms
+ ○ Compiling /history ...
+ ✓ Compiled /history in 12s (825 modules)
+ ✓ Compiled in 636ms (302 modules)
+[?25h

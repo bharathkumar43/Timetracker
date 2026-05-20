@@ -15,7 +15,14 @@
       "Bash(Get-Process -Id 56696)",
       "Bash(Get-Item \"c:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\app\\\\dashboard\\\\page.tsx\")",
       "Bash(Select-Object LastWriteTime, Length)",
-      "Bash(taskkill //PID 56696 //F)"
+      "Bash(taskkill //PID 56696 //F)",
+      "Bash(taskkill //PID 60288 //F)",
+      "Bash(taskkill //PID 38136 //F)",
+      "Bash(Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue)",
+      "Bash(Write-Host \"Cache cleared\")",
+      "PowerShell($pid = \\(netstat -ano | Select-String \":3300 \" | Select-String \"LISTENING\" | ForEach-Object { \\($_ -split '\\\\s+'\\)[-1] } | Select-Object -First 1\\); Write-Host \"PID: $pid\"; taskkill /PID $pid /F)",
+      "PowerShell(netstat -ano)",
+      "PowerShell(taskkill /PID 59052 /F)"
     ]
   }
 }
