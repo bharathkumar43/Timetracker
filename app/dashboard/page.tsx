@@ -22,40 +22,38 @@ interface TimeEntry {
 
 interface RowState {
   entryId?: string;
-  durationInput: string; // raw text the user is typing
-  duration: number;      // parsed minutes (0 = not set)
+  durationInput: string;
+  duration: number;
   notes: string;
-  dirty: boolean;        // unsaved change
+  dirty: boolean;
   saving: boolean;
 }
 
-function durationDisplay(minutes: number): string {
-  return minutes > 0 ? formatDuration(minutes) : "";
-}
-
 export default function DashboardPage() {
-  const { data: session, status } = useSession();
+  const { status } = useSession();
   const router = useRouter();
 
   const [selectedDate, setSelectedDate] = useState<string>("");
-
-  useEffect(() => {
-    setSelectedDate(todayString());
-  }, []);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [loading, setLoading] = useState(true);
   const [saveAllLoading, setSaveAllLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
+  const [saveError, setSaveError] = useState<string>("");
+  const [hasSaved, setHasSaved] = useState(false);      // user clicked Save All at least once this session
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [submittedAt, setSubmittedAt] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string>("");
 
-  // Custom task modal state
   const [showAddTask, setShowAddTask] = useState(false);
   const [newTaskName, setNewTaskName] = useState("");
   const [addingTask, setAddingTask] = useState(false);
   const [addTaskError, setAddTaskError] = useState("");
+
+  useEffect(() => {
+    setSelectedDate(todayString());
+  }, []);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -68,27 +66,30 @@ export default function DashboardPage() {
 
   const fetchSubmissionStatus = useCallback(async (date: string) => {
     if (!date) return;
-    const res = await fetch(`/api/submissions?date=${date}`);
-    if (res.ok) {
-      const data = await res.json();
-      setIsSubmitted(data.submitted);
-      setSubmittedAt(data.submittedAt);
+    try {
+      const res = await fetch(`/api/submissions?date=${date}`);
+      if (res.ok) {
+        const data = await res.json();
+        setIsSubmitted(data.submitted);
+        setSubmittedAt(data.submittedAt);
+      }
+    } catch {
+      // non-critical
     }
   }, []);
 
   const fetchEntries = useCallback(async (date: string) => {
+    if (!date) return;
     setLoading(true);
     const res = await fetch(`/api/entries?date=${date}`);
     if (!res.ok) { setLoading(false); return; }
     const entries: TimeEntry[] = await res.json();
 
-    setRows((prev) => {
-      const next: Record<string, RowState> = { ...prev };
-      // Reset all rows for fresh date
+    setRows(() => {
+      const next: Record<string, RowState> = {};
       for (const task of tasks) {
         next[task.id] = { durationInput: "", duration: 0, notes: "", dirty: false, saving: false };
       }
-      // Populate from saved entries
       for (const entry of entries) {
         next[entry.taskId] = {
           entryId: entry.id,
@@ -105,101 +106,150 @@ export default function DashboardPage() {
   }, [tasks]);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
-  useEffect(() => { if (tasks.length > 0) fetchEntries(selectedDate); }, [tasks, selectedDate, fetchEntries]);
+
   useEffect(() => {
-    if (selectedDate && status === "authenticated") fetchSubmissionStatus(selectedDate);
+    if (tasks.length > 0 && selectedDate) fetchEntries(selectedDate);
+  }, [tasks, selectedDate, fetchEntries]);
+
+  // Reset all per-date state when date changes
+  useEffect(() => {
+    if (selectedDate && status === "authenticated") {
+      setIsSubmitted(false);
+      setSubmittedAt(null);
+      setSubmitError("");
+      setSaveError("");
+      setSaveStatus("idle");
+      setHasSaved(false);
+      fetchSubmissionStatus(selectedDate);
+    }
   }, [selectedDate, status, fetchSubmissionStatus]);
 
   const updateRow = (taskId: string, patch: Partial<RowState>) => {
-    setRows((prev) => ({ ...prev, [taskId]: { ...prev[taskId], ...patch, dirty: true } }));
+    setRows((prev) => ({
+      ...prev,
+      [taskId]: { ...prev[taskId], ...patch, dirty: true },
+    }));
     setSaveStatus("idle");
+    setSaveError("");
   };
 
   const handleDurationBlur = (taskId: string, input: string) => {
+    const trimmed = input.trim().toUpperCase();
+    // "0", "NA", "N/A", empty → treat as "not worked on" (duration 0)
+    if (trimmed === "" || trimmed === "0" || trimmed === "NA" || trimmed === "N/A") {
+      updateRow(taskId, { durationInput: trimmed === "" ? "" : trimmed, duration: 0 });
+      return;
+    }
     const parsed = parseDuration(input);
-    if (input === "") {
-      updateRow(taskId, { durationInput: "", duration: 0 });
-    } else if (parsed !== null) {
+    if (parsed !== null && parsed > 0) {
       updateRow(taskId, { durationInput: formatDuration(parsed), duration: parsed });
     } else {
-      // Invalid — keep input, mark duration 0
-      updateRow(taskId, { duration: 0 });
+      updateRow(taskId, { durationInput: input, duration: 0 });
     }
   };
 
-  const saveRow = async (taskId: string, rowData?: RowState) => {
-    const row = rowData ?? rows[taskId];
-    if (!row || row.duration === 0) return;
-
+  // Always POST upsert — API handles create+update via @@unique([userId, taskId, date])
+  const saveRow = async (taskId: string, date: string, row: RowState): Promise<void> => {
+    if (row.duration === 0) return;
     setRows((prev) => ({ ...prev, [taskId]: { ...prev[taskId], saving: true } }));
-
-    const method = row.entryId ? "PATCH" : "POST";
-    const url = row.entryId ? `/api/entries/${row.entryId}` : "/api/entries";
-    const body = row.entryId
-      ? { duration: row.duration, notes: row.notes }
-      : { taskId, date: selectedDate, duration: row.duration, notes: row.notes };
-
-    const res = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (res.ok) {
+    try {
+      const res = await fetch("/api/entries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId, date, duration: row.duration, notes: row.notes }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error ?? `Save failed (${res.status})`);
+      }
       const entry = await res.json();
       setRows((prev) => ({
         ...prev,
         [taskId]: { ...prev[taskId], entryId: entry.id, dirty: false, saving: false },
       }));
-    } else {
+    } catch (e) {
       setRows((prev) => ({ ...prev, [taskId]: { ...prev[taskId], saving: false } }));
+      throw e;
     }
   };
 
   const saveAll = async () => {
     setSaveAllLoading(true);
+    setSaveError("");
 
-    // Flush any duration inputs that were typed but not yet blurred
-    const flushed = { ...rows };
-    for (const [taskId, row] of Object.entries(flushed)) {
-      if (row.dirty && row.durationInput.trim() && row.duration === 0) {
-        const parsed = parseDuration(row.durationInput);
-        if (parsed !== null && parsed > 0) {
-          flushed[taskId] = { ...row, duration: parsed, durationInput: formatDuration(parsed) };
+    try {
+      // Flush any typed-but-unblurred durations
+      const flushed = { ...rows };
+      for (const [taskId, row] of Object.entries(flushed)) {
+        if (row.dirty && row.durationInput.trim() && row.duration === 0) {
+          const val = row.durationInput.trim().toUpperCase();
+          // Explicitly skip 0/NA — they mean "not worked on"
+          if (val !== "0" && val !== "NA" && val !== "N/A") {
+            const parsed = parseDuration(row.durationInput);
+            if (parsed !== null && parsed > 0) {
+              flushed[taskId] = { ...row, duration: parsed, durationInput: formatDuration(parsed) };
+            }
+          }
         }
       }
+      setRows(flushed);
+
+      // Save dirty rows with actual time entered
+      const toSave = Object.entries(flushed).filter(([, r]) => r.dirty && r.duration > 0);
+      await Promise.all(toSave.map(([taskId, row]) => saveRow(taskId, selectedDate, row)));
+
+      // Delete entries that were cleared (user erased a previously-saved entry)
+      const toDelete = Object.entries(flushed).filter(([, r]) => r.dirty && r.duration === 0 && r.entryId);
+      await Promise.all(toDelete.map(([, row]) =>
+        fetch(`/api/entries/${row.entryId}`, { method: "DELETE" })
+      ));
+
+      // Reset all remaining dirty rows (0/NA/empty — nothing to save for them)
+      setRows((prev) => {
+        const next = { ...prev };
+        for (const taskId of Object.keys(next)) {
+          if (next[taskId].dirty) {
+            next[taskId] = { ...next[taskId], dirty: false, saving: false };
+          }
+        }
+        return next;
+      });
+
+      if (toDelete.length > 0) await fetchEntries(selectedDate);
+
+      setHasSaved(true);
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 3000);
+    } catch (e) {
+      setSaveStatus("error");
+      setSaveError(e instanceof Error ? e.message : "Failed to save. Please try again.");
+    } finally {
+      setSaveAllLoading(false);
     }
-    setRows(flushed);
-
-    const dirtyRows = Object.entries(flushed).filter(([, r]) => r.dirty && r.duration > 0);
-    await Promise.all(dirtyRows.map(([taskId, row]) => saveRow(taskId, row)));
-
-    // Delete rows that were cleared (duration = 0, but had a saved entry)
-    const cleared = Object.entries(rows).filter(([, r]) => r.dirty && r.duration === 0 && r.entryId);
-    for (const [, row] of cleared) {
-      await fetch(`/api/entries/${row.entryId}`, { method: "DELETE" });
-    }
-    if (cleared.length > 0) await fetchEntries(selectedDate);
-
-    setSaveAllLoading(false);
-    setSaveStatus("saved");
-    setTimeout(() => setSaveStatus("idle"), 3000);
   };
 
   const handleSubmit = async () => {
-    if (dirtyCount > 0) await saveAll();
     setSubmitting(true);
-    const res = await fetch("/api/submissions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ date: selectedDate }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setIsSubmitted(true);
-      setSubmittedAt(data.submittedAt);
+    setSubmitError("");
+    try {
+      const res = await fetch("/api/submissions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: selectedDate }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIsSubmitted(true);
+        setSubmittedAt(data.submittedAt);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setSubmitError(err?.error ?? `Submit failed (${res.status}). Please try again.`);
+      }
+    } catch {
+      setSubmitError("Network error. Please check your connection and try again.");
+    } finally {
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
 
   const addCustomTask = async () => {
@@ -223,11 +273,10 @@ export default function DashboardPage() {
   };
 
   const totalMinutes = Object.values(rows).reduce((sum, r) => sum + r.duration, 0);
-  const dirtyCount = Object.values(rows).filter(
-    (r) => r.dirty && (r.duration > 0 || r.durationInput.trim() !== "")
-  ).length;
-  const isToday = selectedDate === todayString();
+  const dirtyCount = Object.values(rows).filter((r) => r.dirty).length;
   const hasSavedEntries = Object.values(rows).some((r) => r.entryId && r.duration > 0);
+  // Can submit if: all changes saved AND (clicked Save All this session OR has existing saved entries)
+  const canSubmit = !submitting && dirtyCount === 0 && (hasSaved || hasSavedEntries);
 
   if (status === "loading" || status === "unauthenticated") {
     return (
@@ -240,15 +289,14 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen">
       <Navbar />
-
       <main className="max-w-3xl mx-auto px-4 py-8 space-y-6">
-        {/* Header row */}
+
+        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Log Your Time</h1>
             <p className="text-slate-500 text-sm mt-0.5">{selectedDate ? formatDate(selectedDate) : ""}</p>
           </div>
-
           <input
             type="date"
             value={selectedDate}
@@ -272,10 +320,9 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Task list */}
+        {/* Task table */}
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          {/* Column headers */}
-          <div className="grid grid-cols-[1fr_140px_1fr] gap-4 px-5 py-2.5 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-500 uppercase tracking-wide">
+          <div className="grid grid-cols-[1fr_160px_1fr] gap-4 px-5 py-2.5 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-500 uppercase tracking-wide">
             <span>Task</span>
             <span>Time Spent</span>
             <span>Notes (optional)</span>
@@ -294,11 +341,10 @@ export default function DashboardPage() {
                 return (
                   <div
                     key={task.id}
-                    className={`grid grid-cols-[1fr_140px_1fr] gap-4 px-5 py-3.5 items-center transition-colors ${
+                    className={`grid grid-cols-[1fr_160px_1fr] gap-4 px-5 py-3.5 items-center transition-colors ${
                       hasValue ? "bg-emerald-50/40" : "hover:bg-slate-50/60"
                     }`}
                   >
-                    {/* Task name */}
                     <div>
                       <p className={`text-sm font-medium ${hasValue ? "text-slate-900" : "text-slate-700"}`}>
                         {task.name}
@@ -308,18 +354,23 @@ export default function DashboardPage() {
                       )}
                     </div>
 
-                    {/* Duration input */}
                     <div className="relative">
                       <input
                         type="text"
-                        placeholder="e.g. 30m, 1h, 1:30"
+                        placeholder="e.g. 1h, 30m, 0, NA"
                         value={row.durationInput}
                         onChange={(e) => {
                           const val = e.target.value;
+                          const trimmed = val.trim().toUpperCase();
+                          if (trimmed === "0" || trimmed === "NA" || trimmed === "N/A") {
+                            updateRow(task.id, { durationInput: val, duration: 0 });
+                            return;
+                          }
                           const parsed = parseDuration(val);
-                          updateRow(task.id, parsed !== null
-                            ? { durationInput: val, duration: parsed }
-                            : { durationInput: val }
+                          updateRow(task.id,
+                            parsed !== null && parsed > 0
+                              ? { durationInput: val, duration: parsed }
+                              : { durationInput: val, duration: 0 }
                           );
                         }}
                         onBlur={(e) => handleDurationBlur(task.id, e.target.value)}
@@ -336,7 +387,6 @@ export default function DashboardPage() {
                       )}
                     </div>
 
-                    {/* Notes */}
                     <input
                       type="text"
                       placeholder="Add a note..."
@@ -368,7 +418,7 @@ export default function DashboardPage() {
             <div className="flex gap-2">
               <input
                 type="text"
-                placeholder="Task name (e.g. Internal hackathon)"
+                placeholder="Task name"
                 value={newTaskName}
                 onChange={(e) => setNewTaskName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addCustomTask()}
@@ -393,9 +443,10 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Save bar */}
+        {/* Bottom action area */}
         <div className="space-y-3 pt-2">
-          {/* Submission status */}
+
+          {/* Submitted banner */}
           {isSubmitted && (
             <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
               <svg className="w-5 h-5 text-emerald-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -412,12 +463,34 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {/* Save error */}
+          {saveStatus === "error" && saveError && (
+            <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+              <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <p className="text-red-700 text-sm font-medium">{saveError}</p>
+            </div>
+          )}
+
+          {/* Submit error */}
+          {submitError && (
+            <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+              <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <p className="text-red-700 text-sm font-medium">{submitError}</p>
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
-            <div className="text-sm text-slate-500">
+            <div className="text-sm">
               {dirtyCount > 0 && (
-                <span className="text-amber-600 font-medium">{dirtyCount} unsaved change{dirtyCount !== 1 ? "s" : ""}</span>
+                <span className="text-amber-600 font-medium">
+                  {dirtyCount} unsaved change{dirtyCount !== 1 ? "s" : ""} — click Save All first
+                </span>
               )}
-              {saveStatus === "saved" && (
+              {saveStatus === "saved" && dirtyCount === 0 && (
                 <span className="text-emerald-600 font-medium flex items-center gap-1">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
@@ -425,26 +498,37 @@ export default function DashboardPage() {
                   Saved!
                 </span>
               )}
+              {!hasSaved && !hasSavedEntries && dirtyCount === 0 && !loading && tasks.length > 0 && (
+                <span className="text-slate-400 text-xs">
+                  Fill in your time or enter 0/NA, then click Save All
+                </span>
+              )}
             </div>
+
             <div className="flex items-center gap-3">
               <button
                 onClick={saveAll}
                 disabled={saveAllLoading || dirtyCount === 0}
                 className="bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 border border-slate-300 font-semibold px-5 py-2.5 rounded-xl transition-colors flex items-center gap-2 text-sm"
               >
-                {saveAllLoading && (
+                {saveAllLoading ? (
                   <div className="w-4 h-4 border-2 border-slate-500 border-t-transparent rounded-full animate-spin" />
-                )}
+                ) : null}
                 {saveAllLoading ? "Saving…" : "Save All"}
               </button>
+
               <button
                 onClick={handleSubmit}
-                disabled={submitting || (!hasSavedEntries && dirtyCount === 0)}
+                disabled={!canSubmit}
+                title={
+                  dirtyCount > 0 ? "Save your changes first" :
+                  (!hasSaved && !hasSavedEntries) ? "Fill in your timesheet and click Save All first" : ""
+                }
                 className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold px-6 py-2.5 rounded-xl transition-colors flex items-center gap-2"
               >
-                {submitting && (
+                {submitting ? (
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                )}
+                ) : null}
                 {submitting ? "Submitting…" : isSubmitted ? "Re-submit" : "Submit"}
               </button>
             </div>

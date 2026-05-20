@@ -2,7 +2,20 @@
   "permissions": {
     "allow": [
       "Bash(Rename-Item -Path \"C:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\next.config.ts\" -NewName \"next.config.js\")",
-      "PowerShell(Rename-Item -Path \"C:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\next.config.ts\" -NewName \"next.config.js\")"
+      "PowerShell(Rename-Item -Path \"C:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\next.config.ts\" -NewName \"next.config.js\")",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\nginx\\\\ssl\")",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\nginx\\\\sites-available\")",
+      "PowerShell(Get-Content \"c:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\.env\" | ForEach-Object { $_ })",
+      "Bash(npx prisma *)",
+      "Bash(npx tsc *)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :3300)",
+      "Bash(tasklist /FI \"PID eq 56696\")",
+      "Bash(tasklist)",
+      "Bash(Get-Process -Id 56696)",
+      "Bash(Get-Item \"c:\\\\Users\\\\BharathTummaganti\\\\employee-time-tracker\\\\app\\\\dashboard\\\\page.tsx\")",
+      "Bash(Select-Object LastWriteTime, Length)",
+      "Bash(taskkill //PID 56696 //F)"
     ]
   }
 }
