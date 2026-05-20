@@ -13,6 +13,8 @@ interface UserWithEntries {
   name: string | null;
   email: string | null;
   role: string;
+  submitted: boolean;
+  submittedAt: string | null;
   timeEntries: TimeEntry[];
 }
 
@@ -126,8 +128,8 @@ export default function AdminPage() {
     );
   }
 
-  const submitted = users.filter((u) => u.timeEntries.length > 0);
-  const notSubmitted = users.filter((u) => u.timeEntries.length === 0);
+  const submitted = users.filter((u) => u.submitted);
+  const notSubmitted = users.filter((u) => !u.submitted);
 
   return (
     <div className="min-h-screen">
@@ -197,6 +199,7 @@ export default function AdminPage() {
               </div>
             )}
 
+
             {overviewLoading ? (
               <div className="flex items-center justify-center py-20">
                 <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
@@ -209,7 +212,9 @@ export default function AdminPage() {
                   const isExpanded = expandedId === user.id;
                   return (
                     <div key={user.id} className={`bg-white rounded-xl border overflow-hidden ${
-                      hasEntries ? "border-slate-200" : "border-red-200 bg-red-50/30"
+                      user.submitted ? "border-slate-200"
+                      : hasEntries ? "border-amber-200 bg-amber-50/20"
+                      : "border-red-200 bg-red-50/30"
                     }`}>
                       <button
                         onClick={() => setExpandedId(isExpanded ? null : user.id)}
@@ -217,7 +222,9 @@ export default function AdminPage() {
                       >
                         <div className="flex items-center gap-3">
                           <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-sm flex-shrink-0 ${
-                            hasEntries ? "bg-blue-100 text-blue-700" : "bg-slate-200 text-slate-500"
+                            user.submitted ? "bg-emerald-100 text-emerald-700"
+                            : hasEntries ? "bg-amber-100 text-amber-700"
+                            : "bg-slate-200 text-slate-500"
                           }`}>
                             {(user.name ?? user.email ?? "?")[0].toUpperCase()}
                           </div>
@@ -227,9 +234,13 @@ export default function AdminPage() {
                           </div>
                         </div>
                         <div className="flex items-center gap-4">
-                          {hasEntries ? (
+                          {user.submitted ? (
                             <span className="text-sm font-semibold text-emerald-700 bg-emerald-100 px-3 py-1 rounded-full">
-                              {formatDuration(totalMinutes)}
+                              Submitted
+                            </span>
+                          ) : hasEntries ? (
+                            <span className="text-sm font-semibold text-amber-600 bg-amber-100 px-3 py-1 rounded-full">
+                              {formatDuration(totalMinutes)} (saved)
                             </span>
                           ) : (
                             <span className="text-sm font-semibold text-red-500 bg-red-100 px-3 py-1 rounded-full">

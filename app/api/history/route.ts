@@ -11,20 +11,35 @@ export async function GET(req: NextRequest) {
   const from = req.nextUrl.searchParams.get("from");
   const to = req.nextUrl.searchParams.get("to");
 
-  const entries = await prisma.timeEntry.findMany({
-    where: {
-      userId: session.user.id,
-      ...(from && to ? { date: { gte: from, lte: to } } : {}),
-    },
-    include: { task: true },
-    orderBy: [{ date: "desc" }, { task: { sortOrder: "asc" } }],
-  });
+  const [entries, submissions] = await Promise.all([
+    prisma.timeEntry.findMany({
+      where: {
+        userId: session.user.id,
+        ...(from && to ? { date: { gte: from, lte: to } } : {}),
+      },
+      include: { task: true },
+      orderBy: [{ date: "desc" }, { task: { sortOrder: "asc" } }],
+    }),
+    prisma.dailySubmission.findMany({
+      where: {
+        userId: session.user.id,
+        ...(from && to ? { date: { gte: from, lte: to } } : {}),
+      },
+    }),
+  ]);
 
-  // Group by date
-  const grouped: Record<string, typeof entries> = {};
+  const submissionMap = new Map(submissions.map((s) => [s.date, s.submittedAt]));
+
+  const grouped: Record<string, { entries: typeof entries; submitted: boolean; submittedAt: string | null }> = {};
   for (const entry of entries) {
-    if (!grouped[entry.date]) grouped[entry.date] = [];
-    grouped[entry.date].push(entry);
+    if (!grouped[entry.date]) {
+      grouped[entry.date] = {
+        entries: [],
+        submitted: submissionMap.has(entry.date),
+        submittedAt: submissionMap.get(entry.date)?.toISOString() ?? null,
+      };
+    }
+    grouped[entry.date].entries.push(entry);
   }
 
   return NextResponse.json(grouped);

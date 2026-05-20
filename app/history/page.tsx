@@ -8,8 +8,12 @@ import { formatDuration, formatDate, todayString } from "@/lib/utils";
 
 interface Task { id: string; name: string }
 interface TimeEntry { id: string; taskId: string; duration: number; notes: string | null; task: Task }
-
-type GroupedEntries = Record<string, TimeEntry[]>;
+interface DayData {
+  entries: TimeEntry[];
+  submitted: boolean;
+  submittedAt: string | null;
+}
+type GroupedEntries = Record<string, DayData>;
 
 function getLast30Days(): { from: string; to: string } {
   const to = todayString();
@@ -94,7 +98,7 @@ export default function HistoryPage() {
         ) : (
           <div className="space-y-4">
             {sortedDates.map((date) => {
-              const entries = grouped[date];
+              const { entries, submitted, submittedAt } = grouped[date];
               const total = entries.reduce((s, e) => s + e.duration, 0);
               const isToday = date === todayString();
 
@@ -106,6 +110,14 @@ export default function HistoryPage() {
                       <span className="font-semibold text-slate-800">{formatDate(date)}</span>
                       {isToday && (
                         <span className="text-xs bg-blue-100 text-blue-700 font-semibold px-2 py-0.5 rounded-full">Today</span>
+                      )}
+                      {submitted && (
+                        <span className="text-xs bg-emerald-100 text-emerald-700 font-semibold px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                          </svg>
+                          Submitted
+                        </span>
                       )}
                     </div>
                     <span className="text-sm font-semibold text-slate-700 bg-white border border-slate-200 px-3 py-1 rounded-lg">

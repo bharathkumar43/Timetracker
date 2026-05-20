@@ -47,6 +47,9 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [saveAllLoading, setSaveAllLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
+  const [isSubmitted, setIsSubmitted] = useState(false);
+  const [submittedAt, setSubmittedAt] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   // Custom task modal state
   const [showAddTask, setShowAddTask] = useState(false);
@@ -61,6 +64,16 @@ export default function DashboardPage() {
   const fetchTasks = useCallback(async () => {
     const res = await fetch("/api/tasks");
     if (res.ok) setTasks(await res.json());
+  }, []);
+
+  const fetchSubmissionStatus = useCallback(async (date: string) => {
+    if (!date) return;
+    const res = await fetch(`/api/submissions?date=${date}`);
+    if (res.ok) {
+      const data = await res.json();
+      setIsSubmitted(data.submitted);
+      setSubmittedAt(data.submittedAt);
+    }
   }, []);
 
   const fetchEntries = useCallback(async (date: string) => {
@@ -93,6 +106,9 @@ export default function DashboardPage() {
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
   useEffect(() => { if (tasks.length > 0) fetchEntries(selectedDate); }, [tasks, selectedDate, fetchEntries]);
+  useEffect(() => {
+    if (selectedDate && status === "authenticated") fetchSubmissionStatus(selectedDate);
+  }, [selectedDate, status, fetchSubmissionStatus]);
 
   const updateRow = (taskId: string, patch: Partial<RowState>) => {
     setRows((prev) => ({ ...prev, [taskId]: { ...prev[taskId], ...patch, dirty: true } }));
@@ -111,8 +127,8 @@ export default function DashboardPage() {
     }
   };
 
-  const saveRow = async (taskId: string) => {
-    const row = rows[taskId];
+  const saveRow = async (taskId: string, rowData?: RowState) => {
+    const row = rowData ?? rows[taskId];
     if (!row || row.duration === 0) return;
 
     setRows((prev) => ({ ...prev, [taskId]: { ...prev[taskId], saving: true } }));
@@ -142,8 +158,21 @@ export default function DashboardPage() {
 
   const saveAll = async () => {
     setSaveAllLoading(true);
-    const dirtyRows = Object.entries(rows).filter(([, r]) => r.dirty && r.duration > 0);
-    await Promise.all(dirtyRows.map(([taskId]) => saveRow(taskId)));
+
+    // Flush any duration inputs that were typed but not yet blurred
+    const flushed = { ...rows };
+    for (const [taskId, row] of Object.entries(flushed)) {
+      if (row.dirty && row.durationInput.trim() && row.duration === 0) {
+        const parsed = parseDuration(row.durationInput);
+        if (parsed !== null && parsed > 0) {
+          flushed[taskId] = { ...row, duration: parsed, durationInput: formatDuration(parsed) };
+        }
+      }
+    }
+    setRows(flushed);
+
+    const dirtyRows = Object.entries(flushed).filter(([, r]) => r.dirty && r.duration > 0);
+    await Promise.all(dirtyRows.map(([taskId, row]) => saveRow(taskId, row)));
 
     // Delete rows that were cleared (duration = 0, but had a saved entry)
     const cleared = Object.entries(rows).filter(([, r]) => r.dirty && r.duration === 0 && r.entryId);
@@ -155,6 +184,22 @@ export default function DashboardPage() {
     setSaveAllLoading(false);
     setSaveStatus("saved");
     setTimeout(() => setSaveStatus("idle"), 3000);
+  };
+
+  const handleSubmit = async () => {
+    if (dirtyCount > 0) await saveAll();
+    setSubmitting(true);
+    const res = await fetch("/api/submissions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date: selectedDate }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setIsSubmitted(true);
+      setSubmittedAt(data.submittedAt);
+    }
+    setSubmitting(false);
   };
 
   const addCustomTask = async () => {
@@ -178,8 +223,11 @@ export default function DashboardPage() {
   };
 
   const totalMinutes = Object.values(rows).reduce((sum, r) => sum + r.duration, 0);
-  const dirtyCount = Object.values(rows).filter((r) => r.dirty && r.duration > 0).length;
+  const dirtyCount = Object.values(rows).filter(
+    (r) => r.dirty && (r.duration > 0 || r.durationInput.trim() !== "")
+  ).length;
   const isToday = selectedDate === todayString();
+  const hasSavedEntries = Object.values(rows).some((r) => r.entryId && r.duration > 0);
 
   if (status === "loading" || status === "unauthenticated") {
     return (
@@ -346,30 +394,61 @@ export default function DashboardPage() {
         )}
 
         {/* Save bar */}
-        <div className="flex items-center justify-between pt-2">
-          <div className="text-sm text-slate-500">
-            {dirtyCount > 0 && (
-              <span className="text-amber-600 font-medium">{dirtyCount} unsaved change{dirtyCount !== 1 ? "s" : ""}</span>
-            )}
-            {saveStatus === "saved" && (
-              <span className="text-emerald-600 font-medium flex items-center gap-1">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                </svg>
-                Saved!
-              </span>
-            )}
+        <div className="space-y-3 pt-2">
+          {/* Submission status */}
+          {isSubmitted && (
+            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+              <svg className="w-5 h-5 text-emerald-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <p className="text-emerald-800 font-semibold text-sm">Timesheet submitted</p>
+                {submittedAt && (
+                  <p className="text-emerald-600 text-xs">
+                    {new Date(submittedAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-500">
+              {dirtyCount > 0 && (
+                <span className="text-amber-600 font-medium">{dirtyCount} unsaved change{dirtyCount !== 1 ? "s" : ""}</span>
+              )}
+              {saveStatus === "saved" && (
+                <span className="text-emerald-600 font-medium flex items-center gap-1">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                  </svg>
+                  Saved!
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={saveAll}
+                disabled={saveAllLoading || dirtyCount === 0}
+                className="bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 border border-slate-300 font-semibold px-5 py-2.5 rounded-xl transition-colors flex items-center gap-2 text-sm"
+              >
+                {saveAllLoading && (
+                  <div className="w-4 h-4 border-2 border-slate-500 border-t-transparent rounded-full animate-spin" />
+                )}
+                {saveAllLoading ? "Saving…" : "Save All"}
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={submitting || (!hasSavedEntries && dirtyCount === 0)}
+                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold px-6 py-2.5 rounded-xl transition-colors flex items-center gap-2"
+              >
+                {submitting && (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                )}
+                {submitting ? "Submitting…" : isSubmitted ? "Re-submit" : "Submit"}
+              </button>
+            </div>
           </div>
-          <button
-            onClick={saveAll}
-            disabled={saveAllLoading || dirtyCount === 0}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold px-6 py-2.5 rounded-xl transition-colors flex items-center gap-2"
-          >
-            {saveAllLoading && (
-              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            )}
-            {saveAllLoading ? "Saving…" : "Save All"}
-          </button>
         </div>
       </main>
     </div>
