@@ -266,7 +266,14 @@ export default function DashboardPage() {
                         type="text"
                         placeholder="e.g. 30m, 1h, 1:30"
                         value={row.durationInput}
-                        onChange={(e) => updateRow(task.id, { durationInput: e.target.value })}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          const parsed = parseDuration(val);
+                          updateRow(task.id, parsed !== null
+                            ? { durationInput: val, duration: parsed }
+                            : { durationInput: val }
+                          );
+                        }}
                         onBlur={(e) => handleDurationBlur(task.id, e.target.value)}
                         className={`w-full border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors ${
                           hasValue
