@@ -8,10 +8,12 @@ export default function Navbar() {
   const { data: session } = useSession();
   const pathname = usePathname();
 
+  const role = session?.user?.role ?? "";
   const navLinks = [
     { href: "/dashboard", label: "Log Time" },
     { href: "/history", label: "My History" },
-    ...(session?.user?.role === "admin" ? [{ href: "/admin", label: "Admin" }] : []),
+    ...(role === "admin" ? [{ href: "/admin", label: "Admin" }] : []),
+    ...(role === "manager" ? [{ href: "/admin", label: "Team" }] : []),
   ];
 
   return (
